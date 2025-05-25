@@ -1,0 +1,32 @@
+# 🚀 Core Web Server
+aiohttp==3.11.18
+aiohttp_cors==0.7.0
+
+# 🐇 Messaging (Consumer only)
+aio-pika==9.5.5
+pika==1.3.2
+
+# 🗄️ Database & Caching
+motor==3.7.0
+pymongo==4.12.0
+redis==5.2.1
+
+# 🧩 Data Modeling & Config
+pydantic==2.11.4
+pydantic-settings==2.9.1
+python-dotenv==1.1.0
+
+# 🌐 HTTP Client (for Scrapyd monitoring)
+requests==2.32.3
+httpx==0.28.1
+
+# 📊 Monitoring
+prometheus_client==0.21.1
+
+# 🧰 Utilities
+colorlog==6.9.0
+typing_extensions>=4.12.2
+
+# 🕒 Time handling
+python-dateutil==2.9.0.post0
+pytz==2024.1
