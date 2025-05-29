@@ -1,17 +1,35 @@
-  
 services:
+  redis:
+    image: redis:7.0-alpine
+    container_name: discovery-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - discovery-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # Enable keyspace notifications for enhanced monitoring
+    command: redis-server --appendonly yes --notify-keyspace-events Ex
+
   scrapyd:
     build:
-      context: .
+      context: ./apps/discovery
       dockerfile: Dockerfile
     image: discovery-scrapyd
     container_name: discovery-scrapyd
     ports:
       - "6800:6800"
     volumes:
-      - ./data:/app/data
-      - ./discovery:/app/discovery  # Mount source code for development
-      - ./screenshots:/app/screenshots  # Dedicated screenshots directory
+      - ./apps/discovery/data:/app/data
+      - ./apps/discovery/discovery:/app/discovery  # Mount source code for development
+      - ./apps/discovery/screenshots:/app/screenshots  # Dedicated screenshots directory
       - scrapyd_eggs:/app/eggs
       - scrapyd_items:/app/items
       - scrapyd_logs:/app/logs
@@ -19,16 +37,33 @@ services:
     restart: unless-stopped
     environment:
       - DISCOVERY_ENV=production
-      - SCRAPYD_USERNAME=${SCRAPYD_USERNAME:-admin}
-      - SCRAPYD_PASSWORD=${SCRAPYD_PASSWORD:-scrapyd}
+      - SCRAPYD_USERNAME=admin
+      - SCRAPYD_PASSWORD=scrapyd123
       - PYTHONPATH=/app
       - SCRAPY_SETTINGS_MODULE=discovery.settings
       # Deployment settings
       - DEPLOY_PROJECT=discovery
       - DEPLOY_VERSION=1.0
       - DEPLOY_SPIDERS=true
+      # Redis cache settings
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - HTTP_CACHE_TTL=3600
+      # MongoDB settings
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=discovery
+      # Twisted reactor and Playwright settings
+      - TWISTED_REACTOR=twisted.internet.asyncioreactor.AsyncioSelectorReactor
+      - PLAYWRIGHT_BROWSER_TYPE=chromium
+      - PLAYWRIGHT_LAUNCH_OPTIONS={"headless":true}
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "-u", "${SCRAPYD_USERNAME}:${SCRAPYD_PASSWORD}", "http://localhost:6800/daemonstatus.json"]
+      test: ["CMD", "curl", "-f", "-u", "admin:scrapyd123", "http://localhost:6800/daemonstatus.json"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -46,132 +81,125 @@ services:
   
   webhook:
     build:
-      context: .
+      context: ./apps/discovery
       dockerfile: Dockerfile.webhook
     image: discovery-webhook
     container_name: discovery-webhook
     ports:
       - "8000:8000"
     depends_on:
-      - scrapyd
+      scrapyd:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     environment:
       - SCRAPYD_URL=http://scrapyd:6800
       - PROJECT_NAME=Discovery
       - DEFAULT_SPIDER=quick
+      # Redis cache settings
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - HTTP_CACHE_TTL=3600
     volumes:
-      - ./webhook_handler.py:/app/webhook_handler.py
-      - ./data/logs:/app/logs
+      - ./apps/discovery/webhook_handler.py:/app/webhook_handler.py
+      - ./apps/discovery/data/logs:/app/logs
     networks:
       - discovery-network
-  
-  # MongoDB Database
-  mongodb:
-    image: mongo:6.0
-    container_name: discoverybot-mongodb
-    ports:
-      - "${MONGO_PORT:-27017}:27017"
-    environment:
-      - MONGO_INITDB_DATABASE=${MONGO_DATABASE:-DiscoveryBot}
-    volumes:
-      - mongodb-data:/data/db
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    networks:
-      - discoverybot-network
+      start_period: 10s
 
-  # Redis Cache & Session Store
-  redis:
-    image: redis:7.0-alpine
-    container_name: discoverybot-redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+  # SIMPLIFIED MongoDB without authentication for development
+  mongodb:
+    image: mongo:6.0
+    container_name: discovery-mongodb
     volumes:
-      - redis-data:/data
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - mongodb_data:/data/db
+    ports:
+      - "27017:27017"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+    # NO AUTHENTICATION for simplicity
+    command: mongod --bind_ip_all
     networks:
-      - discoverybot-network
+      - discovery-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  # RabbitMQ Message Broker
+  # SIMPLIFIED RabbitMQ with consistent credentials
   rabbitmq:
     image: rabbitmq:3.11-management-alpine
-    container_name: discoverybot-rabbitmq
-    hostname: rabbitmq
-    ports:
-      - "${RABBITMQ_PORT:-5672}:5672"
-      - "15672:15672"
-    environment:
-      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-guest}
-      - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_VHOST:-/}
+    container_name: discovery-rabbitmq
     volumes:
-      - rabbitmq-data:/var/lib/rabbitmq
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./apps/rabbitmq/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    ports:
+      - "5672:5672"  # AMQP port
+      - "15672:15672"  # Management UI
     restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=rabbitmq123
+      - RABBITMQ_DEFAULT_VHOST=discovery
+    networks:
+      - discovery-network
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
       start_period: 30s
-    networks:
-      - discoverybot-network
 
-
-   # Scheduler Service (API + Consumer + Monitor)
   scheduler:
-    build:
+    build: 
       context: .
-      dockerfile: scheduler/Dockerfile
+      dockerfile: apps/scheduler/Dockerfile
     image: discoverybot/scheduler:latest
-    container_name: discoverybot-scheduler
+    container_name: discovery-scheduler
     ports:
-      - "${HEALTH_PORT:-8001}:8001"
+      - '8001:8001'
     environment:
-      # Database Configuration
-      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/DiscoveryBot}
-      - MONGO_HOST=${MONGO_HOST:-mongodb}
-      - MONGO_PORT=${MONGO_PORT:-27017}
-      - MONGO_DATABASE=${MONGO_DATABASE:-DiscoveryBot}
-      - REDIS_HOST=${REDIS_HOST:-redis}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # SIMPLIFIED MongoDB connection (no auth)
+      - MONGO_URI=mongodb://mongodb:27017/discovery
+      - MONGO_DB_NAME=discovery
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      # CONSISTENT RabbitMQ credentials
+      - RABBITMQ_URI=amqp://admin:rabbitmq123@rabbitmq:5672/discovery
       
-      # Message Broker
-      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672//}
-      - RABBITMQ_HOST=${RABBITMQ_HOST:-rabbitmq}
-      - RABBITMQ_PORT=${RABBITMQ_PORT:-5672}
-      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
-      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
-      - RABBITMQ_EXCHANGE=${RABBITMQ_EXCHANGE:-discovery-jobs}
-      - RABBITMQ_QUEUE=${RABBITMQ_QUEUE:-crawl-requests}
+      # Scrapyd settings with CONSISTENT credentials
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_USERNAME=admin
+      - SCRAPYD_PASSWORD=scrapyd123
+      - SCRAPYD_PROJECT=discovery
       
-      # Services
-      - SCRAPYD_URL=${SCRAPYD_URL:-http://scrapyd:6800}
-      - SCRAPYD_HOST=${SCRAPYD_HOST:-scrapyd}
-      - SCRAPYD_PORT=${SCRAPYD_PORT:-6800}
-      - SCRAPYD_PROJECT=${SCRAPYD_PROJECT:-DiscoveryBot}
+      # Enhanced settings for optimized architecture
+      - SSE_MAX_DURATION=600
+      - SSE_HEARTBEAT_INTERVAL=2
+      - RESULTS_FETCH_TIMEOUT=30
+      - CRAWL_CACHE_TTL=3600
+      - HTTP_CACHE_TTL=3600
       
-      # Service Configuration
-      - HEALTH_PORT=8001
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - PYTHONUNBUFFERED=1
+      # API settings
+      - API_PREFIX=/api/v1
+      - DEBUG=false
+      
+      # Webhook settings
+      - WEBHOOK_NOTIFICATION_URL=${WEBHOOK_NOTIFICATION_URL:-}
+      
     volumes:
-      - ./logs:/app/logs
-      - ./scheduler:/app/scheduler:ro
-      - ./common:/app/common:ro
+      # Share Scrapyd volumes for result access (optimized architecture)
+      - scrapyd_items:/app/items:ro
+      - scrapyd_logs:/app/logs:ro
     depends_on:
       mongodb:
         condition: service_healthy
@@ -181,143 +209,209 @@ services:
         condition: service_healthy
       scrapyd:
         condition: service_healthy
-      celery-worker:
-        condition: service_started
     restart: unless-stopped
+    networks:
+      - discovery-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    networks:
-      - discoverybot-network
-  
-  # Celery Worker (Job Execution)
+      start_period: 10s
+
+  # FIXED Celery Worker with CONSISTENT credentials
   celery-worker:
-    build:
+    build: 
       context: .
-      dockerfile: celery/Dockerfile
+      dockerfile: apps/celery/Dockerfile
     image: discoverybot/celery:latest
-    container_name: discoverybot-celery-worker
-    command: ["worker"]
-    environment:
-      # Message Broker
-      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672//}
-      - REDIS_CELERY_URL=${REDIS_CELERY_URL:-redis://redis:6379/1}
-      
-      # Database Configuration
-      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/DiscoveryBot}
-      - MONGO_DATABASE=${MONGO_DATABASE:-DiscoveryBot}
-      - REDIS_HOST=${REDIS_HOST:-redis}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      
-      # Services
-      - SCRAPYD_URL=${SCRAPYD_URL:-http://scrapyd:6800}
-      - SCRAPYD_PROJECT=${SCRAPYD_PROJECT:-DiscoveryBot}
-      
-      # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - PYTHONUNBUFFERED=1
+    container_name: discovery-celery-worker
+    init: true
     volumes:
-      - ./Discovery:/app/Discovery:ro
-      - ./common:/app/common:ro
-      - ./celery:/app/celery:ro
-      - ./logs:/app/logs
+      - ./apps:/app/apps
+      - ./apps/discovery/data:/app/data
+      - ./apps/discovery/logs:/app/logs
+    environment:
+      # CONSISTENT RabbitMQ and Redis credentials
+      - CELERY_BROKER_URL=amqp://admin:rabbitmq123@rabbitmq:5672/discovery
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+      
+      # Updated queue names for optimized system
+      - CELERY_QUEUES=scheduled_queue,maintenance_queue,notification_queue,health_queue
+      - CELERY_CONCURRENCY=4
+      - CELERY_LOGLEVEL=info
+      
+      # Enable events for Flower monitoring
+      - CELERY_SEND_EVENTS=True
+      - CELERY_SEND_TASK_SENT_EVENT=True
+      
+      # SIMPLIFIED MongoDB connection (no auth)
+      - MONGODB_URI=mongodb://mongodb:27017/discovery
+      - MONGODB_DB_NAME=discovery
+      
+      # CONSISTENT Scrapyd credentials
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_USERNAME=admin
+      - SCRAPYD_PASSWORD=scrapyd123
+      - SCRAPYD_PROJECT=discovery
+      - PYTHONPATH=/app
+      
+      # Webhook settings
+      - WEBHOOK_NOTIFICATION_URL=${WEBHOOK_NOTIFICATION_URL:-}
+      
     depends_on:
-      - redis
-      - rabbitmq
-      - mongodb
-      - scrapyd
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      scrapyd:
+        condition: service_healthy
     restart: unless-stopped
+    networks:
+      - discovery-network
     healthcheck:
-      test: ["CMD", "celery", "-A", "celery_app", "inspect", "ping"]
+      test: ["CMD", "celery", "-A", "apps.celery.celery", "inspect", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    networks:
-      - discoverybot-network
+      start_period: 20s
 
-  # Celery Beat (Scheduler)
+  # FIXED Celery Beat with CONSISTENT credentials
   celery-beat:
-    build:
+    build: 
       context: .
-      dockerfile: celery/Dockerfile
+      dockerfile: apps/celery/Dockerfile
     image: discoverybot/celery:latest
-    container_name: discoverybot-celery-beat
-    command: ["beat"]
-    environment:
-      # Message Broker
-      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672//}
-      - REDIS_CELERY_URL=${REDIS_CELERY_URL:-redis://redis:6379/1}
-      
-      # Database Configuration
-      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/DiscoveryBot}
-      - MONGO_DATABASE=${MONGO_DATABASE:-DiscoveryBot}
-      - REDIS_HOST=${REDIS_HOST:-redis}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      
-      # Services
-      - SCRAPYD_URL=${SCRAPYD_URL:-http://scrapyd:6800}
-      - SCRAPYD_PROJECT=${SCRAPYD_PROJECT:-DiscoveryBot}
-      
-      # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - PYTHONUNBUFFERED=1
+    container_name: discovery-celery-beat
     volumes:
-      - ./Discovery:/app/Discovery:ro
-      - ./common:/app/common:ro
-      - ./celery:/app/celery:ro
-      - ./logs:/app/logs
-      # FIXED: Mount beat data to a separate location to avoid read-only conflict
-      - celery-beat-data:/var/lib/celery-beat
+      - ./apps:/app/apps
+      - beat_db_data:/app/beat_db
+    environment:
+      # CONSISTENT credentials
+      - CELERY_BROKER_URL=amqp://admin:rabbitmq123@rabbitmq:5672/discovery
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CELERY_LOGLEVEL=info
+      - MONGODB_URI=mongodb://mongodb:27017/discovery
+      - MONGODB_DB_NAME=discovery
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_PROJECT=discovery
+      - PYTHONPATH=/app
+      
     depends_on:
-      - redis
-      - rabbitmq
-      - mongodb
-      - scrapyd
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      celery-worker:
+        condition: service_healthy
     restart: unless-stopped
     networks:
-      - discoverybot-network
+      - discovery-network
+    command: >
+      celery -A apps.celery.celery beat 
+      --loglevel=info 
+      --pidfile=/tmp/celerybeat.pid
 
-  # Celery Flower (Optional - Web UI)
+  # FIXED Celery Flower with CONSISTENT credentials
   celery-flower:
-    build:
-      context: .
-      dockerfile: celery/Dockerfile
-    image: discoverybot/celery:latest
-    container_name: discoverybot-celery-flower
-    command: ["flower"]
+    image: mher/flower:2.0.1
+    container_name: discovery-celery-flower
+    restart: unless-stopped
     ports:
       - "5555:5555"
     environment:
-      - RABBITMQ_URL=${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672//}
-      - REDIS_CELERY_URL=${REDIS_CELERY_URL:-redis://redis:6379/1}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # CONSISTENT RabbitMQ credentials
+      - CELERY_BROKER_URL=amqp://admin:rabbitmq123@rabbitmq:5672/discovery
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - FLOWER_BASIC_AUTH=admin:flower123
+      - FLOWER_PORT=5555
+      - FLOWER_ADDRESS=0.0.0.0
+      - FLOWER_PERSISTENT=True
+      - FLOWER_DB=/data/flower.db
+      - FLOWER_ENABLE_EVENTS=True
+      - FLOWER_MAX_TASKS=10000
+      - FLOWER_AUTO_REFRESH=True
+      
     volumes:
-      - ./celery:/app/celery:ro
+      - flower_data:/data
+    user: "1000:1000"
     depends_on:
-      - redis
-      - rabbitmq
-      - celery-worker
-    restart: unless-stopped
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_healthy
     networks:
-      - discoverybot-network
+      - discovery-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-u", "admin:flower123", "http://localhost:5555/api/workers"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    command: >
+      celery 
+      --broker=amqp://admin:rabbitmq123@rabbitmq:5672/discovery 
+      flower 
+      --address=0.0.0.0 
+      --port=5555 
+      --basic_auth=admin:flower123
+      --persistent=True
+      --db=/data/flower.db
+      --max_tasks=10000
+      
+  # DBGate - Database management UI
+  dbgate:
+    image: dbgate/dbgate:latest
+    container_name: dbgate-dev
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      - DBGATE_ADMIN_USERNAME=${DBGATE_USERNAME:-admin}
+      - DBGATE_ADMIN_PASSWORD=${DBGATE_PASSWORD:-admin}
+    volumes:
+      - dbgate_data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - discovery-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  networks:
-    discovery-network:
+networks:
+  discovery-network:
     driver: bridge
 
-  volumes:
-    scrapyd_eggs:
-    scrapyd_items:
-    scrapyd_logs:
-    scrapyd_dbs:
-    mongodb-data:
-    redis-data:
-    rabbitmq-data:
-    scrapyd-data:
-    celery-beat-data:
+volumes:
+  scrapyd_eggs:
+  scrapyd_items:
+  scrapyd_logs:
+  scrapyd_dbs:
+  redis_data:
+  mongodb_data:
+  rabbitmq_data:
+  celery_beat_data:
+  beat_db_data:
+    driver: local
+  flower_data:
+    driver: local
+  dbgate_data:
+    driver: local

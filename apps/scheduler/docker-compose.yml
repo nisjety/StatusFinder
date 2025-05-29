@@ -1,0 +1,120 @@
+services:
+  scheduler:
+    build: .
+    container_name: discoverybot_scheduler
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/discovery
+      - MONGO_DB_NAME=discovery
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672//
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_PROJECT=discovery
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+      - redis
+      - rabbitmq
+      - scrapyd
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - discoverybot_network
+
+  celery-worker:
+    build: .
+    container_name: discoverybot_celery_worker
+    command: celery -A app.tasks.celery worker --loglevel=info
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/discovery
+      - MONGO_DB_NAME=discovery
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672//
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_PROJECT=discovery
+    depends_on:
+      - mongodb
+      - redis
+      - rabbitmq
+      - scrapyd
+    restart: unless-stopped
+    networks:
+      - discoverybot_network
+
+  celery-beat:
+    build: .
+    container_name: discoverybot_celery_beat
+    command: celery -A app.tasks.celery beat --loglevel=info
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/discovery
+      - MONGO_DB_NAME=discovery
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672//
+      - SCRAPYD_URL=http://scrapyd:6800
+      - SCRAPYD_PROJECT=discovery
+    depends_on:
+      - mongodb
+      - redis
+      - rabbitmq
+      - scrapyd
+    restart: unless-stopped
+    networks:
+      - discoverybot_network
+
+  mongodb:
+    image: mongo:5.0
+    container_name: discoverybot_mongodb
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - discoverybot_network
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: discoverybot_redis
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - discoverybot_network
+
+  rabbitmq:
+    image: rabbitmq:3.11-management-alpine
+    container_name: discoverybot_rabbitmq
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - discoverybot_network
+
+  scrapyd:
+    image: vimagick/scrapyd:latest
+    container_name: discoverybot_scrapyd
+    volumes:
+      - scrapyd_data:/var/lib/scrapyd
+    ports:
+      - "6800:6800"
+    networks:
+      - discoverybot_network
+
+networks:
+  discoverybot_network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
+  rabbitmq_data:
+  scrapyd_data:
